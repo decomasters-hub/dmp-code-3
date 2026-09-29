@@ -1,0 +1,59 @@
+{
+  "name": "dmp-app",
+  "version": "0.1.0",
+  "description": "Windows application built with Electron + React + CSS",
+  "main": "electron/main.js",
+  "type": "module",
+  "scripts": {
+    "dev:vite": "vite",
+    "dev:electron": "wait-on http://localhost:5173 --timeout 120000 && electron ./electron/main.js",
+    "dev:electron:nowait": "electron ./electron/main.js",
+    "dev": "concurrently -k -n vite,electron -c blue,green \"npm.cmd run dev:vite\" \"npm.cmd run dev:electron\"",
+    "build:web": "vite build",
+    "build:win": "vite build && electron-builder --win",
+    "dist": "npm.cmd run build:win",
+    "start": "electron ./electron/main.js",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "@dicebear/bottts-neutral": "^9.4.2",
+    "@dicebear/core": "^9.4.2",
+    "@opencode/sdk": "^2.0.19",
+    "marked": "^18.0.14",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "@opencode/client": "^2.0.19"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-react": "^4.3.3",
+    "concurrently": "^9.0.1",
+    "electron": "^33.0.0",
+    "electron-builder": "^25.1.8",
+    "vite": "^6.0.0",
+    "wait-on": "^8.0.1"
+  },
+  "build": {
+    "appId": "com.dmp.app",
+    "productName": "DMP App",
+    "win": {
+      "target": [
+        "nsis"
+      ]
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true
+    },
+    "files": [
+      "dist/**/*",
+      "electron/**/*",
+      "package.json"
+    ]
+  },
+  "allowScripts": {
+    "electron@33.4.11": true,
+    "esbuild@0.25.12": true
+  }
+}

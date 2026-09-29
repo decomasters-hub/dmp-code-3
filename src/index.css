@@ -1,0 +1,75 @@
+/* Design tokens — dark-first, calm, native Windows feel */
+:root {
+  --bg: #0d1015;
+  --bg-soft: #11151d;
+  --surface: #151b26;
+  --surface-2: #1a2130;
+  --surface-3: #202839;
+  --border: #232c40;
+  --border-soft: #1c2333;
+  --text: #e7eaf1;
+  --text-dim: #aab3c5;
+  --text-faint: #767f93;
+  --accent: #5b8cff;
+  --accent-soft: rgba(91, 140, 255, 0.12);
+  --accent-strong: #3f6fe0;
+  --danger: #e0655f;
+  --success: #4cc38a;
+  --warning: #e0a63f;
+  --radius-s: 6px;
+  --radius-m: 10px;
+  --radius-l: 14px;
+  --sidebar-w: 292px;
+  --header-h: 60px;
+  --composer-max: 760px;
+  --font: "Segoe UI", system-ui, -apple-system, "Helvetica Neue", Arial, sans-serif;
+  --mono: Consolas, "Cascadia Code", ui-monospace, monospace;
+  --ease: cubic-bezier(0.16, 1, 0.3, 1);
+  --t-fast: 140ms;
+  --t-med: 210ms;
+  --t-slow: 300ms;
+  --density-pad: 10px;
+  --msg-max: 720px;
+}
+
+[data-theme="light"] {
+  --bg: #eef0f4;
+  --bg-soft: #e7eaf0;
+  --surface: #ffffff;
+  --surface-2: #f3f5f9;
+  --surface-3: #e9edf4;
+  --border: #dde3ec;
+  --border-soft: #e7ebf2;
+  --text: #171b24;
+  --text-dim: #5a6376;
+  --text-faint: #8b94a7;
+  --accent-soft: rgba(63, 111, 224, 0.1);
+}
+
+[data-density="compact"] {
+  --density-pad: 6px;
+  --header-h: 52px;
+}
+
+* { box-sizing: border-box; }
+html, body, #root { height: 100%; }
+body {
+  margin: 0;
+  font-family: var(--font);
+  background: var(--bg);
+  color: var(--text);
+  font-size: 14px;
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+  overflow: hidden;
+}
+button, input, textarea { font-family: inherit; }
+::selection { background: rgba(91, 140, 255, 0.3); }
+
+/* Scrollbars — thin, native */
+::-webkit-scrollbar { width: 10px; height: 10px; }
+::-webkit-scrollbar-thumb { background: #2b3549; border-radius: 8px; border: 2px solid transparent; background-clip: content-box; }
+[data-theme="light"] ::-webkit-scrollbar-thumb { background: #c3cad6; border: 2px solid transparent; background-clip: content-box; }
+::-webkit-scrollbar-track { background: transparent; }
+
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; border-radius: 4px; }
