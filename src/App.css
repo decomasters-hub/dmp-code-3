@@ -137,6 +137,10 @@
 .msg-text.md table { border-collapse: collapse; margin: 0 0 10px; font-size: 13px; }
 .msg-text.md th, .msg-text.md td { border: 1px solid var(--border); padding: 6px 10px; text-align: left; }
 .msg-text.md hr { border: 0; border-top: 1px solid var(--border-soft); margin: 12px 0; }
+/* Tool receipt rows (assistant tool calls, compact) */
+.msg.tool { padding: 2px 4px; border: 0; }
+.tool-receipt { display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--text-faint); font-family: var(--mono); }
+.tool-name { color: var(--text-dim); font-weight: 600; }
 .icon-btn:disabled { opacity: 0.35; cursor: not-allowed; }
 .icon-btn:disabled:hover { background: transparent; color: var(--text-dim); border-color: transparent; }
 .typing { display: flex; gap: 5px; padding: 6px 0; }

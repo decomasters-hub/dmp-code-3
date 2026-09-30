@@ -39,7 +39,18 @@ contextBridge.exposeInMainWorld('api', {
     // Drop the conversation->session mapping (stale-cleanup on delete)
     forget: (key) => ipcRenderer.invoke('dmp:session:forget', { key }),
     // Re-apply instructions to mapped sessions: { updated, failed }
-    updateInstructions: (keys, instructions) => ipcRenderer.invoke('dmp:session:instructions', { keys, instructions }),
+    updateInstructions: (keys, instructions, tools) => ipcRenderer.invoke('dmp:session:instructions', { keys, instructions, tools }),
+  },
+  approvals: {
+    // Subscribe to tool-approval requests: cb({ key, requestID, sessionID,
+    // action, resources, message }). Returns unsub.
+    onAsked: (cb) => {
+      const h = (_evt, data) => cb(data);
+      ipcRenderer.on('dmp:permission-asked', h);
+      return () => ipcRenderer.removeListener('dmp:permission-asked', h);
+    },
+    // Answer one: decision once | always | reject. Resolves { ok }.
+    reply: (payload) => ipcRenderer.invoke('dmp:permission:reply', payload || {}),
   },
   state: {
     // Persist UI state; main merges in the live session map.

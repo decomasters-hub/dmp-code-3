@@ -5,7 +5,7 @@ import { fileURLToPath } from 'node:url';
 // Fixed identity so dev and packaged builds share one data directory:
 // %APPDATA%\DMP App on Windows.
 app.setName('DMP App');
-import { listModels, chat, abort, closeRuntime, getStatus, getSessionMap, restoreSessionMap, forgetSession, getHistory, updateSessionInstructions } from './runtime.js';
+import { listModels, chat, abort, closeRuntime, getStatus, getSessionMap, restoreSessionMap, forgetSession, getHistory, updateSessionInstructions, setApprovalSink, replyPermission } from './runtime.js';
 import { initStore, loadState, saveState } from './store.js';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -82,7 +82,18 @@ app.whenReady().then(async () => {
     forgetSession(payload?.key);
     return { ok: true };
   });
-  ipcMain.handle('dmp:session:instructions', (_evt, payload) => updateSessionInstructions(payload?.keys, payload?.instructions));
+  ipcMain.handle('dmp:session:instructions', (_evt, payload) => updateSessionInstructions(payload?.keys, payload?.instructions, payload?.tools));
+  // Approval requests (permission.asked) go to every window; the renderer
+  // demultiplexes by conversation key and answers via dmp:permission:reply.
+  setApprovalSink((req) => {
+    for (const w of BrowserWindow.getAllWindows()) {
+      w.webContents.send('dmp:permission-asked', req);
+    }
+  });
+  ipcMain.handle('dmp:permission:reply', (_evt, payload) => replyPermission(payload || {}).catch((e) => {
+    console.error('[dmp:permission:reply]', e?.message ?? e);
+    return { ok: false, error: String(e?.message ?? e) };
+  }));
   // Restore persisted conversation->session mappings in the background
   // (validated server-side; never blocks window creation). ensureSession
   // re-validates hits anyway, so this is map hygiene, not load-bearing.

@@ -114,10 +114,11 @@ export async function sendChat({ agent, conversationKey, text, model, onChunk })
         title: agent?.name ? `${agent.name} — chat` : 'DMP conversation',
         instructions: agent?.instructions ?? '',
         agentId: agent?.id ?? null,
+        tools: agent?.tools ?? null,
         // Mock shelf ids are UI-only; send undefined so the server uses default.
         model: isMockId(model) ? undefined : model,
       });
-      return { text: res.text, live: true, sessionID: res.sessionID };
+      return { text: res.text, live: true, sessionID: res.sessionID, toolRuns: res.toolRuns ?? [] };
     } finally {
       unsub?.();
     }
@@ -137,6 +138,49 @@ export function abortChat(conversationKey) {
   return window.api.runtime.abort({ key: conversationKey }).catch(() => ({ interrupted: false }));
 }
 
+// Tool-approval requests, demultiplexed by conversation key (same pattern
+// as chat chunks). cb receives { requestID, sessionID, action, resources,
+// message } for its conversation key.
+const approvalSubs = new Map(); // key -> Set<fn>; null key = all requests
+let approvalListening = false;
+
+function ensureApprovalListener() {
+  if (approvalListening || !hasRuntime()) return;
+  approvalListening = true;
+  window.api.approvals.onAsked((req = {}) => {
+    const targets = [approvalSubs.get(req.key), approvalSubs.get(null)].filter(Boolean);
+    for (const set of targets) {
+      for (const fn of [...set]) {
+        try {
+          fn(req);
+        } catch {
+          // subscriber errors must not break other conversations
+        }
+      }
+    }
+  });
+}
+
+export function onApproval(conversationKey, fn) {
+  if (!hasRuntime()) return () => {};
+  ensureApprovalListener();
+  let set = approvalSubs.get(conversationKey);
+  if (!set) {
+    set = new Set();
+    approvalSubs.set(conversationKey, set);
+  }
+  set.add(fn);
+  return () => {
+    set.delete(fn);
+    if (set.size === 0) approvalSubs.delete(conversationKey);
+  };
+}
+
+export function replyApproval({ requestID, sessionID, decision }) {
+  if (!hasRuntime()) return Promise.resolve({ ok: false });
+  return window.api.approvals.reply({ requestID, sessionID, decision }).catch((e) => ({ ok: false, error: String(e?.message ?? e) }));
+}
+
 export async function fetchHistory(conversationKey) {
   if (!hasRuntime()) return { messages: [], sessionID: null };
   try {
@@ -151,10 +195,10 @@ export function forgetSession(conversationKey) {
   return window.api.sessions.forget(conversationKey).catch(() => ({ ok: false }));
 }
 
-export async function pushInstructions(convKeys, instructions) {
+export async function pushInstructions(convKeys, instructions, tools) {
   if (!hasRuntime()) return { updated: [], failed: [] };
   try {
-    return await window.api.sessions.updateInstructions(convKeys, instructions);
+    return await window.api.sessions.updateInstructions(convKeys, instructions, tools ?? null);
   } catch (e) {
     return { updated: [], failed: [{ key: '*', error: String(e?.message ?? e) }] };
   }

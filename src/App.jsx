@@ -4,13 +4,15 @@ import AgentHeader from './components/AgentHeader.jsx';
 import ConversationView, { EmptyAgentState } from './components/ConversationView.jsx';
 import Composer from './components/Composer.jsx';
 import AgentModal from './components/AgentModal.jsx';
+import ApprovalModal from './components/ApprovalModal.jsx';
 import { DeleteConfirm, RenamePrompt } from './components/ConfirmModals.jsx';
 import SearchPalette from './components/SearchPalette.jsx';
 import SettingsModal from './components/SettingsModal.jsx';
 import ContextMenu from './components/ContextMenu.jsx';
 import HistoryPanel from './components/HistoryPanel.jsx';
 import { seedAgents } from './lib/mock.js';
-import { fetchShelf, fetchStatus, sendChat, abortChat, forgetSession, fetchHistory, pushInstructions, loadPersistedState, persistState, hasRuntime } from './lib/runtime.js';
+import { fetchShelf, fetchStatus, sendChat, abortChat, forgetSession, fetchHistory, pushInstructions, loadPersistedState, persistState, hasRuntime, onApproval, replyApproval } from './lib/runtime.js';
+import { normalizeTools } from './lib/toolPolicy.js';
 import { uid, now } from './lib/utils.js';
 import './App.css';
 
@@ -27,14 +29,23 @@ const AGENT_MENU = [
 
 const SEED = seedAgents();
 
-// Every agent carries its own selected model id (null = server default).
+// Every agent carries its own selected model id (null = server default)
+// and its own tool policy (normalized against role defaults).
 // Persisted agents keep theirs; seeds start unresolved.
 function withModel(a) {
   return a.model !== undefined ? a : { ...a, model: null };
 }
 
+function withTools(a) {
+  return { ...a, tools: normalizeTools(a) };
+}
+
+function normalizeAgent(a) {
+  return withTools(withModel(a));
+}
+
 export default function App() {
-  const [agents, setAgents] = useState(() => SEED.map(withModel));
+  const [agents, setAgents] = useState(() => SEED.map(normalizeAgent));
   const [activeAgentId, setActiveAgentId] = useState('ag_atlas');
   const [activeConv, setActiveConv] = useState(() => {
     const m = {};
@@ -58,6 +69,7 @@ export default function App() {
   const [live, setLive] = useState(false);
   const [booted, setBooted] = useState(false);
   const [ocStatus, setOcStatus] = useState(null);
+  const [approvals, setApprovals] = useState([]); // queued permission.asked requests
   const timers = useRef([]);
   const reqs = useRef(new Map()); // convId -> { stopped } while a generation runs
 
@@ -73,7 +85,7 @@ export default function App() {
       if (!on) return;
       if (saved && Array.isArray(saved.agents) && saved.agents.length > 0) {
         const validIds = new Set(saved.agents.map((a) => a.id));
-        setAgents(saved.agents.map(withModel));
+        setAgents(saved.agents.map(normalizeAgent));
         if (saved.activeAgentId && validIds.has(saved.activeAgentId)) setActiveAgentId(saved.activeAgentId);
         if (saved.activeConv) {
           setActiveConv((prev) => {
@@ -117,6 +129,23 @@ export default function App() {
     setLive(sh.live);
     if (sh.defaultId) setShelfDefault(sh.defaultId);
     return s;
+  }
+
+  // Tool-approval requests from any conversation land here; the modal shows
+  // the first, the rest queue. Decisions resume the paused run server-side.
+  useEffect(() => {
+    if (!hasRuntime()) return;
+    return onApproval(null, (req) => {
+      setApprovals((p) => (p.some((r) => r.requestID === req.requestID) ? p : [...p, req]));
+    });
+  }, [booted]);
+
+  async function decideApproval(decision) {
+    const [head, ...rest] = approvals;
+    if (!head) return;
+    setApprovals(rest);
+    const res = await replyApproval({ requestID: head.requestID, sessionID: head.sessionID, decision });
+    if (!res?.ok) setStatus(activeAgentId, 'Needs attention');
   }
 
   const agent = useMemo(() => agents.find((a) => a.id === activeAgentId) || agents[0], [agents, activeAgentId]);
@@ -181,7 +210,8 @@ export default function App() {
   function createAgent(data) {
     const id = uid('ag');
     const a = { id, status: 'Ready', activity: 'Just now', conversations: [], model: agentModelId, ...data };
-    setAgents((p) => [a, ...p]);
+    const normalized = { ...a, tools: normalizeTools({ id, ...(a.tools || {}) }) };
+    setAgents((p) => [normalized, ...p]);
     setActiveAgentId(id);
     setActiveConv((p) => ({ ...p, [id]: null }));
     setModal(null);
@@ -198,7 +228,7 @@ export default function App() {
     if (prev && typeof data.instructions === 'string' && data.instructions !== prev.instructions) {
       const keys = (prev.conversations || []).map((c) => c.id);
       if (keys.length > 0) {
-        pushInstructions(keys, data.instructions).then((res) => {
+        pushInstructions(keys, data.instructions, prev.tools).then((res) => {
           if (res?.failed?.length) setStatus(agent.id, 'Needs attention');
         });
       }
@@ -295,6 +325,12 @@ export default function App() {
         },
       });
       upsertReply(res.text);
+      if (Array.isArray(res.toolRuns) && res.toolRuns.length > 0) {
+        const rows = res.toolRuns.map((t) => ({ id: uid('m'), role: 'tool', name: t.name, status: t.status, ts: now() }));
+        setAgents((p) => p.map((a) => (a.id === targetId
+          ? { ...a, conversations: a.conversations.map((c) => (c.id === cid ? { ...c, messages: [...c.messages, ...rows], updatedAt: now() } : c)) }
+          : a)));
+      }
       setStatus(targetId, req.stopped ? 'Ready' : 'Done');
       if (!req.stopped) timers.current.push(setTimeout(() => setStatus(targetId, 'Ready'), 1400));
     } catch (e) {
@@ -480,6 +516,13 @@ export default function App() {
         />
       )}
       {settingsOpen && <SettingsModal settings={settings} onChange={setSettings} onClose={() => setSettingsOpen(false)} opencode={ocStatus} onRefreshStatus={refreshStatus} />}
+      {approvals.length > 0 && (
+        <ApprovalModal
+          request={approvals[0]}
+          queueCount={approvals.length - 1}
+          onDecision={decideApproval}
+        />
+      )}
       {ctx && <ContextMenu menu={ctx} onClose={() => setCtx(null)} onAction={ctxAction} />}
     </div>
   );

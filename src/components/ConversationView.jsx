@@ -21,6 +21,20 @@ export function EmptyAgentState({ agent, onStarter }) {
 }
 
 function MessageRow({ m, agent }) {
+  if (m.role === 'tool') {
+    const ok = m.status === 'completed';
+    return (
+      <div className="msg tool">
+        <div className="msg-body">
+          <div className="tool-receipt" title={`Tool ${m.name}: ${m.status}`}>
+            <span aria-hidden="true">{ok ? '✓' : '•'}</span>
+            <span className="tool-name">{m.name}</span>
+            <span className="msg-ts">{m.status}</span>
+          </div>
+        </div>
+      </div>
+    );
+  }
   const isUser = m.role === 'user';
   const html = !isUser ? renderAssistantMarkdown(m.content) : null;
   return (

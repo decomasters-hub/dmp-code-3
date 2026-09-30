@@ -2,6 +2,7 @@ import { OpenCode } from '@opencode/client';
 import { Service } from '@opencode/client/service';
 import { detectCli, serviceCommand } from './opencode-env.js';
 import { agentDir } from './store.js';
+import { normalizeTools, buildPermissions, toolsSummary } from './tools.js';
 
 // Runtime owner for the user's REAL OpenCode installation.
 // Unlike the embedded @opencode/sdk server, this connects to the local
@@ -78,30 +79,29 @@ export async function listModels() {
 
 const sessionByKey = new Map(); // dmp conversation id -> opencode session id
 
-// Chat-only: deny every mutating / sensing tool action observed in the
-// service's agent permission vocabulary; allow everything else (which is
-// what text generation itself needs — a blanket deny-all breaks the
-// provider call with a 403, verified empirically).
-// Shape follows OpenCode V2 Permission.Ruleset.
-const CHAT_DENIES = [
-  'edit', 'write', 'bash', 'shell', 'read', 'glob', 'grep',
-  'webfetch', 'websearch', 'question', 'subagent', 'task',
-  'skill', 'command', 'external_directory',
-];
-const CHAT_PERMISSIONS = [
-  ...CHAT_DENIES.map((action) => ({ action, resource: '*', effect: 'deny' })),
-  { action: '*', resource: '*', effect: 'allow' },
-];
+// Per-agent tool policy is built by buildPermissions() in tools.js.
+// (Proven constraint: a blanket deny-all breaks the provider call with a
+// 403, so policy is always scoped rules plus a tail allow-all.)
 
-// Infrastructure directive kept separate from the user's persona entry so
-// the two never mix. Denials alone stop execution, but the model still sees
-// tool schemas and may otherwise claim actions it never performed.
-const RUNTIME_DIRECTIVE = [
-  '[DMP runtime: this is a chat-only session.',
-  'Every tool call will be denied — you cannot run commands, read or write',
-  'files, or browse. Never claim to have done any of those things.',
-  'Answer from knowledge, and say plainly when a task would need real tools.]',
-].join(' ');
+// Per-agent tool policy lives in electron/tools.js (buildPermissions).
+// A blanket deny-all breaks the provider call with a 403 (verified), so
+// policy is always scoped allows/denies plus a tail allow-all.
+
+// Directive prefix kept separate from the user's persona entry so the two
+// never mix. Denials alone stop execution, but the model still sees tool
+// schemas and may otherwise claim actions it never performed.
+function runtimeDirective(tools, memoryPath) {
+  const summary = toolsSummary(tools);
+  const lines = [`[DMP runtime: tools for this agent — ${summary}.`];
+  if (summary.startsWith('no tools')) {
+    lines.push('You are a chat-only agent: do not call any tools. Answer from knowledge and say plainly when a task would need real tools.]');
+  } else {
+    lines.push('Only use the allowed tools, staying inside the agent workspace.');
+    lines.push(`Agent memory file: ${memoryPath} — record durable user preferences there with your file tools when they change, and re-read it when relevant.]`);
+  }
+  lines.push('[DMP runtime: approvals exist — ask-first tools pause for the user to approve in the app and then run, so always attempt them when the task needs them. Never call the question tool itself: nothing can answer it. If you feel confirmation is needed, state what you are about to do and proceed.]');
+  return lines.join(' ');
+}
 
 function logErr(scope, e) {
   console.error(`[dmp:${scope}]`, e?.message ?? e);
@@ -201,14 +201,28 @@ export async function restoreSessionMap(saved) {
   return { restored };
 }
 
-async function putPersona(c, sessionID, instructions) {
-  // Durable per-session persona without touching OpenCode agent ids,
-  // plus the chat-only runtime directive (separate entry).
+async function readMemory(agentDirPath) {
+  if (!agentDirPath) return '';
+  try {
+    const fs = await import('node:fs');
+    const p = (await import('node:path')).join(agentDirPath, 'memory.md');
+    const text = fs.readFileSync(p, 'utf8');
+    return typeof text === 'string' ? text.slice(0, 8000) : '';
+  } catch {
+    return '';
+  }
+}
+
+async function putPersona(c, sessionID, { instructions, tools, dir }) {
+  // Durable per-session entries without touching OpenCode agent ids:
+  // user persona, runtime directive (tool-aware), and agent memory file.
   // Failures are logged; chat still proceeds so one bad write can't
   // silently kill a conversation.
+  const memory = await readMemory(dir);
   const entries = [
     instructions ? ['dmp-persona', instructions] : null,
-    ['dmp-runtime', RUNTIME_DIRECTIVE],
+    ['dmp-runtime', runtimeDirective(tools, dir ? `${dir}\\memory.md` : 'memory.md')],
+    memory ? ['dmp-memory', memory] : null,
   ].filter(Boolean);
   for (const [key, value] of entries) {
     try {
@@ -219,7 +233,7 @@ async function putPersona(c, sessionID, instructions) {
   }
 }
 
-export async function ensureSession({ key, title, instructions, model, agentId }) {
+export async function ensureSession({ key, title, instructions, model, agentId, tools }) {
   const hit = sessionByKey.get(key);
   if (hit) {
     // Re-validate cheaply: a server restart may have dropped the session.
@@ -235,19 +249,21 @@ export async function ensureSession({ key, title, instructions, model, agentId }
   // Root the session in the agent's own data folder so the working
   // directory is truthful per agent. Falls back to server default when
   // the folder can't be prepared.
-  let location;
+  let dir;
   try {
-    if (agentId) location = { directory: agentDir(agentId) };
+    if (agentId) dir = agentDir(agentId);
   } catch (e) {
     logErr('agent-dir', e);
   }
+  const policy = normalizeTools({ id: agentId, tools });
+  const perms = buildPermissions(policy, dir || null);
   let created;
   try {
     created = await c.session.create({
       title: (title || 'DMP conversation').slice(0, 80),
       model: parseModelRef(model),
-      permissions: CHAT_PERMISSIONS,
-      ...(location ? { location } : {}),
+      permissions: perms,
+      ...(dir ? { location: { directory: dir } } : {}),
     });
   } catch (e) {
     logErr('session.create', e);
@@ -257,14 +273,14 @@ export async function ensureSession({ key, title, instructions, model, agentId }
   const id = created?.id;
   if (!id) throw new Error('session.create returned no id');
   sessionByKey.set(key, id);
-  await putPersona(c, id, instructions);
+  await putPersona(c, id, { instructions, tools: policy, dir });
   return id;
 }
 
-// Re-apply agent instructions to an existing session (e.g. after the user
-// edits them). Returns per-key results; failures are reported, not thrown,
-// so one bad session doesn't block the rest.
-export async function updateSessionInstructions(keys, instructions) {
+// Re-apply agent instructions to existing sessions (e.g. after the user
+// edits them). Refreshes persona, runtime directive, and memory entries.
+// Returns per-key results; failures are reported, not thrown.
+export async function updateSessionInstructions(keys, instructions, tools) {
   const c = await getClient();
   const updated = [];
   const failed = [];
@@ -272,10 +288,17 @@ export async function updateSessionInstructions(keys, instructions) {
     const sessionID = sessionByKey.get(key);
     if (!sessionID) continue;
     try {
+      const info = await c.session.get({ sessionID }).catch(() => null);
+      const dir = info?.location?.directory ?? null;
+      const policy = normalizeTools({ tools });
       if (instructions) {
         await c.session.instructions.entry.put({ sessionID, key: 'dmp-persona', value: instructions });
       }
-      await c.session.instructions.entry.put({ sessionID, key: 'dmp-runtime', value: RUNTIME_DIRECTIVE });
+      await c.session.instructions.entry.put({ sessionID, key: 'dmp-runtime', value: runtimeDirective(policy, dir ? `${dir}\\memory.md` : 'memory.md') });
+      const memory = await readMemory(dir);
+      if (memory) {
+        await c.session.instructions.entry.put({ sessionID, key: 'dmp-memory', value: memory });
+      }
       updated.push(key);
     } catch (e) {
       logErr('update-instructions', e);
@@ -313,9 +336,16 @@ function assistantText(msg) {
     .trim();
 }
 
-export async function chat({ key, text, title, instructions, model, agentId, onChunk }) {
+function toolRuns(msg) {
+  if (!msg || msg.type !== 'assistant' || !Array.isArray(msg.content)) return [];
+  return msg.content
+    .filter((p) => p && p.type === 'tool')
+    .map((p) => ({ name: p.name, status: p.state?.status ?? 'unknown' }));
+}
+
+export async function chat({ key, text, title, instructions, model, agentId, tools, onChunk }) {
   const c = await getClient();
-  const sessionID = await ensureSession({ key, title, instructions, model, agentId });
+  const sessionID = await ensureSession({ key, title, instructions, model, agentId, tools });
   // Keep model selection in sync when the user switches mid-conversation.
   const ref = parseModelRef(model);
   if (ref) {
@@ -346,7 +376,20 @@ export async function chat({ key, text, title, instructions, model, agentId, onC
       throw new Error(`Prompt failed: ${e?.message ?? e}`);
     }
     try {
-      await c.session.wait({ sessionID });
+      // Guard against runs that stall forever (e.g. an interactive tool
+      // with no UI to answer it): stop the session and fail loudly.
+      const TIMEOUT_MS = 6 * 60 * 1000;
+      let timedOut = false;
+      const timer = setTimeout(async () => {
+        timedOut = true;
+        try { await c.session.interrupt({ sessionID }); } catch { /* ignore */ }
+      }, TIMEOUT_MS);
+      try {
+        await c.session.wait({ sessionID });
+      } finally {
+        clearTimeout(timer);
+      }
+      if (timedOut) throw new Error(`Generation timed out after ${TIMEOUT_MS / 1000}s and was interrupted.`);
     } catch (e) {
       logErr('wait', e);
       throw new Error(`Generation failed: ${e?.message ?? e}`);
@@ -359,7 +402,7 @@ export async function chat({ key, text, title, instructions, model, agentId, onC
       const detail = errMsg?.error?.message ?? errMsg?.error?.code ?? 'empty reply';
       throw new Error(`Model returned no text (${detail}). Check provider auth (opencode auth login).`);
     }
-    return { sessionID, text: assistantText(latest) };
+    return { sessionID, text: assistantText(latest), toolRuns: toolRuns(latest) };
   } finally {
     if (entry) chunkHandlers.get(sessionID)?.delete(entry);
   }
@@ -378,6 +421,33 @@ export async function abort({ key }) {
   } catch (e) {
     logErr('interrupt', e);
     return { interrupted: false, error: String(e?.message ?? e) };
+  }
+}
+
+// --- approval (HITL) plumbing ------------------------------------------
+// effect:'ask' rules pause the run server-side with a `permission.asked`
+// event. Main installs a sink that forwards the request to the UI; the UI
+// answers through replyPermission(). Decisions: once | always | reject.
+let approvalSink = null;
+export function setApprovalSink(fn) {
+  approvalSink = typeof fn === 'function' ? fn : null;
+}
+
+function sessionKey(sessionID) {
+  for (const [k, v] of sessionByKey) if (v === sessionID) return k;
+  return null;
+}
+
+export async function replyPermission({ requestID, sessionID, decision, message }) {
+  if (!requestID || !sessionID) throw new Error('permission reply needs requestID + sessionID');
+  if (!['once', 'always', 'reject'].includes(decision)) throw new Error(`bad decision: ${decision}`);
+  const c = await getClient();
+  try {
+    await c.permission.reply({ sessionID, requestID, decision, ...(message ? { message } : {}) });
+    return { ok: true };
+  } catch (e) {
+    logErr('permission.reply', e);
+    throw new Error(`Permission reply failed: ${e?.message ?? e}`);
   }
 }
 
@@ -410,6 +480,23 @@ function emit(entry, text) {
 function routeEvent(evt) {
   if (!evt) return;
   const d = evt.data ?? {};
+  if (evt.type === 'permission.asked') {
+    if (approvalSink && d.sessionID && d.id) {
+      try {
+        approvalSink({
+          key: sessionKey(d.sessionID),
+          requestID: d.id,
+          sessionID: d.sessionID,
+          action: d.action,
+          resources: d.resources ?? [],
+          message: d.message ?? null,
+        });
+      } catch (e) {
+        logErr('approval-sink', e);
+      }
+    }
+    return;
+  }
   if (!d.sessionID) return;
   const set = chunkHandlers.get(d.sessionID);
   if (!set || set.size === 0) return;
